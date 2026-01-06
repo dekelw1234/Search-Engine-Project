@@ -12,6 +12,31 @@ from pathlib import Path
 import pickle
 from inverted_index_local import InvertedIndex, MultiFileReader
 import math
+from nltk.stem import LancasterStemmer
+
+
+
+from inverted_index_gcp import InvertedIndex
+
+from inverted_index_gcp import InvertedIndex
+from nltk.stem import LancasterStemmer
+from collections import defaultdict
+
+stemmer = LancasterStemmer()
+
+# Title index
+title_index = InvertedIndex.read_index(
+    base_dir="title_index",
+    name="with_stemming",
+    bucket_name=None   # ב-Colab / Local
+)
+
+# Anchor index
+anchor_index = InvertedIndex.read_index(
+    base_dir="anchor_index",
+    name="with_stemming",
+    bucket_name=None
+)
 
 
 class MyFlaskApp(Flask):
@@ -21,6 +46,36 @@ class MyFlaskApp(Flask):
 
 app = MyFlaskApp(__name__)
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
+
+
+def search_binary_logic(query, index):
+    tokens_with_types = tokenize(query)
+
+    tokens = [
+        stemmer.stem(tok.lower())
+        for tok, tok_type in tokens_with_types
+        if tok_type == 'WORD'
+    ]
+
+    doc_scores = defaultdict(int)
+
+    for term in set(tokens):
+        try:
+            posting_list = index.read_a_posting_list("", term)
+        except Exception:
+            continue
+
+        for doc_id, tf in posting_list:
+            doc_scores[doc_id] += 1
+
+    ranked_docs = sorted(
+        doc_scores.items(),
+        key=lambda x: (-x[1], x[0])
+    )
+
+    return ranked_docs[:100]
+
+
 
 # --- CONFIGURATION ---
 DATA_DIR = Path(__file__).parent / 'postings_gcp'
@@ -144,7 +199,11 @@ def search():
     if len(query) == 0:
         return jsonify(res)
 
-    tokens = tokenize(query)
+    tokens = [
+    stemmer.stem(tok.lower())
+    for tok, tok_type in tokenize_with_types(query)
+    if tok_type == 'WORD'
+]
 
     # 1. Calculate Scores
     # Weights configuration
@@ -202,36 +261,25 @@ def search_body():
 
 
 @app.route("/search_title")
+@app.route("/search_title")
 def search_title():
-    """ Returns binary scores for title """
-    res = []
     query = request.args.get('query', '')
-    if len(query) == 0: return jsonify(res)
+    if query == "":
+        return jsonify([])
 
-    tokens = tokenize(query)
-    scores = get_binary_score(tokens, title_index)
+    results = search_binary_logic(query, title_index)
+    return jsonify(results)
 
-    # Sort by score desc, then doc_id asc
-    sorted_scores = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-
-    res = [(str(doc_id), id2title.get(doc_id, str(doc_id))) for doc_id, score in sorted_scores]
-    return jsonify(res)
 
 
 @app.route("/search_anchor")
 def search_anchor():
-    """ Returns binary scores for anchor """
-    res = []
     query = request.args.get('query', '')
-    if len(query) == 0: return jsonify(res)
+    if query == "":
+        return jsonify([])
 
-    tokens = tokenize(query)
-    scores = get_binary_score(tokens, anchor_index)
-
-    sorted_scores = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-
-    res = [(str(doc_id), id2title.get(doc_id, str(doc_id))) for doc_id, score in sorted_scores]
-    return jsonify(res)
+    results = search_binary_logic(query, anchor_index)
+    return jsonify(results)
 
 
 @app.route("/get_pagerank", methods=['POST'])
