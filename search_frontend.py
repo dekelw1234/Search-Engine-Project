@@ -1,43 +1,44 @@
 from flask import Flask, request, jsonify
-import sys
-from collections import Counter, defaultdict
-import itertools
-from itertools import islice, count, groupby
-import pandas as pd
-import os
-import re
-from operator import itemgetter
-from time import time
-from pathlib import Path
 import pickle
-from inverted_index_local import InvertedIndex, MultiFileReader
+from inverted_index_gcp import InvertedIndex
+import nltk
+from nltk.corpus import stopwords
+import re
 import math
-from nltk.stem import LancasterStemmer
+from collections import Counter
+import heapq # Required for efficient Top-K
 
+# Loading all necessary data once when the server starts
+print("Loading indices and metadata... please wait")
 
+# Loading Inverted Indices from the postings folder
+with open('postings_gcp/body_index.pkl', 'rb') as f:
+    body_index = pickle.load(f)
+with open('postings_gcp/title_index.pkl', 'rb') as f:
+    title_index = pickle.load(f)
+with open('postings_gcp/anchor_index.pkl', 'rb') as f:
+    anchor_index = pickle.load(f)
 
-from inverted_index_gcp import InvertedIndex
+# Loading Ranking Dictionaries
+with open('pagerank.pkl', 'rb') as f:
+    pagerank_dict = pickle.load(f)
+with open('pageviews.pkl', 'rb') as f:
+    pageview_dict = pickle.load(f)
 
-from inverted_index_gcp import InvertedIndex
-from nltk.stem import LancasterStemmer
-from collections import defaultdict
+global_boost_dict = {}
+all_relevant_ids = set(pagerank_dict.keys()) | set(pageview_dict.keys())
 
-stemmer = LancasterStemmer()
+for doc_id in all_relevant_ids:
+    pr = pagerank_dict.get(doc_id, 0)
+    pv = pageview_dict.get(doc_id, 0)
+    # The formula is pre-calculated here
+    global_boost_dict[doc_id] = (1 + math.log10(pr + 1)) * (1 + math.log10(pv + 1))
+# Mapping Wiki IDs to Titles
+with open('id_to_title.pkl', 'rb') as f:
+    id_to_title = pickle.load(f)
 
-# Title index
-title_index = InvertedIndex.read_index(
-    base_dir="title_index",
-    name="with_stemming",
-    bucket_name=None   # ב-Colab / Local
-)
-
-# Anchor index
-anchor_index = InvertedIndex.read_index(
-    base_dir="anchor_index",
-    name="with_stemming",
-    bucket_name=None
-)
-
+# Average document length for BM25 calculation
+AVG_BODY_LEN = getattr(body_index, 'avg_body_len', 500)
 
 class MyFlaskApp(Flask):
     def run(self, host=None, port=None, debug=None, **options):
@@ -47,270 +48,429 @@ class MyFlaskApp(Flask):
 app = MyFlaskApp(__name__)
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 
+# --- Global Data & Setup ---
 
-def search_binary_logic(query, index):
-    tokens_with_types = tokenize(query)
-
-    tokens = [
-        stemmer.stem(tok.lower())
-        for tok, tok_type in tokens_with_types
-        if tok_type == 'WORD'
-    ]
-
-    doc_scores = defaultdict(int)
-
-    for term in set(tokens):
-        try:
-            posting_list = index.read_a_posting_list("", term)
-        except Exception:
-            continue
-
-        for doc_id, tf in posting_list:
-            doc_scores[doc_id] += 1
-
-    ranked_docs = sorted(
-        doc_scores.items(),
-        key=lambda x: (-x[1], x[0])
-    )
-
-    return ranked_docs[:100]
+# Tokenizer setup
+RE_WORD = re.compile(r"""[\#\@\w](['\-]?\w)*""", re.UNICODE)
+nltk.download('stopwords')
+english_stopwords = frozenset(stopwords.words('english'))
+def get_html_pattern():
+  # Pattern breakdown:
+    # <       - opening angle bracket
+    # [^>]+   - one or more characters that are NOT >
+    # >       - closing angle bracket
+  return r'<[^>]+>'
 
 
+def get_date_pattern():
+    # Days 1-31
+    day_31 = r'(0?[1-9]|[12][0-9]|3[01])'
 
-# --- CONFIGURATION ---
-DATA_DIR = Path(__file__).parent / 'postings_gcp'
+    # Days 1-30
+    day_30 = r'(0?[1-9]|[12][0-9]|30)'
 
-# Global Variables (Loaded at startup)
-body_index = None
-title_index = None
-anchor_index = None
-page_rank = None
-page_views = None
-doc_lengths = None
-id2title = None  # Dictionary mapping doc_id -> title
-bm25_engine = None
+    # Days 1-29 (for February)
+    day_29 = r'(0?[1-9]|[12][0-9])'
 
-# --- STOPWORDS & TOKENIZER ---
-english_stopwords = frozenset([
-    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "as", "at", "be",
-    "because", "been", "before", "being", "below", "between", "both", "but", "by", "could", "did", "do", "does",
-    "doing", "down", "during", "each", "few", "for", "from", "further", "had", "has", "have", "having", "he", "her",
-    "here", "hers", "herself", "him", "himself", "his", "how", "i", "if", "in", "into", "is", "it", "its", "itself",
-    "me", "more", "most", "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other",
-    "ought", "our", "ours", "ourselves", "out", "over", "own", "same", "she", "should", "so", "some", "such", "than",
-    "that", "the", "their", "theirs", "them", "themselves", "then", "there", "these", "they", "this", "those",
-    "through", "to", "too", "under", "until", "up", "very", "was", "we", "were", "what", "when", "where", "which",
-    "while", "who", "whom", "why", "with", "would", "you", "your", "yours", "yourself", "yourselves"
-])
+    # Months with 31 days
+    months_31 = r'(Jan|January|Mar|March|May|Jul|July|Aug|August|Oct|October|Dec|December)'
 
-corpus_stopwords = frozenset([
-    "category", "references", "also", "external", "links", "may", "first", "see", "history", "people", "one", "two",
-    "part", "thumb", "including", "second", "following", "many", "however", "would", "became"
-])
+    # Months with 30 days
+    months_30 = r'(Apr|April|Jun|June|Sep|September|Nov|November)'
 
-all_stopwords = english_stopwords.union(corpus_stopwords)
-RE_WORD = re.compile(r"""[\#\@\w](['\-]?\w){2,24}""", re.UNICODE)
+    # February
+    feb = r'(Feb|February)'
+
+    # MM DD YYYY
+    text_31 = rf'{months_31}\s+{day_31}(?:st|nd|rd|th)?,?\s*\d{{2,4}}'
+    text_30 = rf'{months_30}\s+{day_30}(?:st|nd|rd|th)?,?\s*\d{{2,4}}'
+    text_feb = rf'{feb}\s+{day_29}(?:st|nd|rd|th)?,?\s*\d{{2,4}}'
+
+    # DD MM YYYY
+    text2_31 = rf'{day_31}(?:st|nd|rd|th)?\s+{months_31},?\s+\d{{2,4}}'
+    text2_30 = rf'{day_30}(?:st|nd|rd|th)?\s+{months_30},?\s+\d{{2,4}}'
+    text2_feb = rf'{day_29}(?:st|nd|rd|th)?\s+{feb},?\s+\d{{2,4}}'
+
+    # Numeric dates
+    numeric_date = rf'{day_29}[/.\-]{day_29}[/.\-]\d{{2,4}}'
+
+    # combine all patterns
+    return rf'{text_31}|{text_30}|{text_feb}|{text2_31}|{text2_30}|{text2_feb}|{numeric_date}'
+
+def get_time_pattern():
+  # valid hours
+    hours_24 = r'([01]?[0-9]|2[0-3])'  # 0-23
+    hours_12 = r'(0?[1-9]|1[0-2])'      # 1-12
+
+  # valid minutes and seconds
+    min_sec = r'[0-5][0-9]' # 00-59
+
+  # 24-hour without AM/PM
+    time_24 = rf'(?<!\d:){hours_24}:{min_sec}(:{min_sec})?(?!:\d{{2}}|\s?[aApP]\.?[mM]\.?)'
+
+  # 12-hour DOT + AM/PM
+    time_12_dot = rf'{hours_12}\.{min_sec}[AP]M'
+
+  # 12-hour NO SEP + a.m./p.m.
+    time_12_nosep = rf'{hours_12}{min_sec}[ap]\.m\.'
+
+   # combine all patterns
+    return rf'{time_24}|{time_12_dot}|{time_12_nosep}'
+
+def get_percent_pattern():
+  # Pattern breakdown:
+    # \d+  - one or more digits (without)
+    # \.?  - optional decimal point
+    # \d*  - zero or more digits after decimal
+    # %    - literal percent sign
+  return r'\d+\.?\d*%'
+
+
+def get_number_pattern():
+  # Pattern breakdown:
+    # (?<![A-Za-z0-9_+\-,.])   - number cannot be preceded by letters, digits, signs, comma, or dot
+    # (?:[+-])?                - optional sign
+    # ([0-9]{1,3}(,[0-9]{3})*|[0-9]+) - integer part: valid commas or plain digits
+    # (?:\.[0-9]+)?            - optional decimal part
+    # (?!%|\.\d|\.[A-Za-z]|,\d|\d)-no percent, digit after dot/comma, or letters""
+    sign = r"(?:[+-])?"
+    int_part = r"([0-9]{1,3}(,[0-9]{3})*|[0-9]+)(?:\.[0-9]+)?"
+    prefix = r"(?<![A-Za-z0-9_\+\-\,\.])"
+    suffix = r"(?!%)(?!\.\d)(?!\.[A-Za-z])(?!,\d)(?!\d)"
+
+    # combine all patterns
+    return rf"{prefix}{sign}{int_part}{suffix}"
+
+
+def get_word_pattern():
+  # Pattern breakdown:
+    # (?<!-)           - not preceded by hyphen
+    # [a-zA-Z]+        - one or more letters (start)
+    # (['-][a-zA-Z]+)* - zero or more groups of (apostrophe/hyphen + letters)
+    # '?               - optional trailing apostrophe (for parents')
+  return r"(?<!-)[a-zA-Z]+(['-][a-zA-Z]+)*'?"
+RE_TOKENIZE = re.compile(rf"""
+(
+    # parsing html tags
+     (?P<HTMLTAG>{get_html_pattern()})
+    # dates
+    |(?P<DATE>{get_date_pattern()})
+    # time
+    |(?P<TIME>{get_time_pattern()})
+    # Percents
+    |(?P<PERCENT>{get_percent_pattern()})
+    # Numbers
+    |(?P<NUMBER>{get_number_pattern()})
+    # Words
+    |(?P<WORD>{get_word_pattern()})
+    # space
+    |(?P<SPACE>[\s\t\n]+)
+    # everything else
+    |(?P<OTHER>.))""",  re.MULTILINE | re.IGNORECASE | re.VERBOSE | re.UNICODE)
 
 
 def tokenize(text):
-    return [token.group() for token in RE_WORD.finditer(text.lower()) if token.group() not in all_stopwords]
+    tokens = [v for match in RE_TOKENIZE.finditer(text)
+              for k, v in match.groupdict().items()
+              if v is not None and k != 'SPACE']
+
+    return [t.lower() for t in tokens if t.lower() not in english_stopwords]
 
 
-# --- BM25 IMPLEMENTATION ---
-class BM25:
-    def __init__(self, index, dl_dict, k1=1.5, b=0.75):
-        self.index = index
-        self.dl = dl_dict
-        self.N = len(dl_dict) if dl_dict else 0
-        self.AVGDL = sum(dl_dict.values()) / self.N if self.N > 0 else 0
-        self.k1 = k1
-        self.b = b
+def get_bm25_scores(query_tokens, index, k1=1.5, b=0.75):
+    """
+    Implements BM25 ranking logic.
+    BM25 formula: $score(D, Q) = \sum_{q \in Q} IDF(q) \cdot \frac{f(q, D) \cdot (k_1 + 1)}{f(q, D) + k_1 \cdot (1 - b + b \cdot \frac{|D|}{avgdl})}$
+    """
+    scores = {}
+    N = len(index.DL)
+    for term in query_tokens:
+        if term in index.df:
+            df = index.df[term]
+            idf = math.log10((N - df + 0.5) / (df + 0.5) + 1)
+            postings = index.read_posting_list(term, 'postings_gcp/')
+            for doc_id, tf in postings:
+                doc_len = index.DL.get(doc_id, AVG_BODY_LEN)
+                denominator = tf + k1 * (1 - b + b * (doc_len / AVG_BODY_LEN))
+                scores[doc_id] = scores.get(doc_id, 0) + (idf * tf * (k1 + 1) / denominator)
+    return scores
 
-    def search(self, query_tokens):
-        scores = defaultdict(float)
-        for token in query_tokens:
-            if token not in self.index.df:
-                continue
+def get_tfidf_scores(query_tokens, index):
+    """ Classic TF-IDF Cosine Similarity for the /search_body route. """
+    scores = {}
+    query_counts = Counter(query_tokens)
+    query_norm_sq = 0
+    for term, tf_q in query_counts.items():
+        if term in index.df:
+            idf = math.log10(len(index.DL) / index.df[term])
+            w_t_q = tf_q * idf
+            query_norm_sq += w_t_q**2
+            postings = index.read_posting_list(term, 'postings_gcp/')
+            for doc_id, tf_d in postings:
+                scores[doc_id] = scores.get(doc_id, 0) + (w_t_q * tf_d * idf)
+    if not scores: return {}
+    q_norm = math.sqrt(query_norm_sq)
+    return {doc_id: dot / (q_norm * index.doc_norms.get(doc_id, 1)) for doc_id, dot in scores.items()}
 
-            # Read posting list
-            posting_list = self.index.read_a_posting_list("", token, str(DATA_DIR))
+# --- Helper Functions for Scoring ---
 
-            df = self.index.df[token]
-            idf = math.log(1 + (self.N - df + 0.5) / (df + 0.5))
-
-            for doc_id, tf in posting_list:
-                doc_len = self.dl.get(doc_id, self.AVGDL)
-                numerator = idf * tf * (self.k1 + 1)
-                denominator = tf + self.k1 * (1 - self.b + self.b * (doc_len / self.AVGDL))
-                scores[doc_id] += numerator / denominator
-        return scores
-
-
-# --- STARTUP ---
-@app.before_first_request
-def startup():
-    global body_index, title_index, anchor_index, page_rank, page_views, doc_lengths, id2title, bm25_engine
-    print("Loading data...")
-    try:
-        # Load Indices
-        body_index = InvertedIndex.read_index(str(DATA_DIR), 'index')
-        title_index = InvertedIndex.read_index(str(DATA_DIR), 'title_index')
-        anchor_index = InvertedIndex.read_index(str(DATA_DIR), 'anchor_index')
-
-        # Load Aux Data
-        with open(DATA_DIR / 'pr.pkl', 'rb') as f:
-            page_rank = pickle.load(f)
-        with open(DATA_DIR / 'pageviews.pkl', 'rb') as f:
-            page_views = pickle.load(f)
-        with open(DATA_DIR / 'doc_lengths.pkl', 'rb') as f:
-            doc_lengths = pickle.load(f)
-        with open(DATA_DIR / 'id2title.pkl', 'rb') as f:
-            id2title = pickle.load(f)
-
-        # Initialize BM25
-        bm25_engine = BM25(body_index, doc_lengths)
-        print("Data loaded successfully!")
-    except Exception as e:
-        print(f"Error loading data: {e}")
-        print("Please ensure you ran 'build_local_indices.py' with the latest logic to generate all .pkl files.")
-
-
-# --- HELPER FUNCTIONS ---
-def get_binary_score(query_tokens, index):
-    scores = defaultdict(int)
-    if not index: return scores
-    for token in query_tokens:
-        if token in index.df:
-            pl = index.read_a_posting_list("", token, str(DATA_DIR))
-            for doc_id, _ in pl:
-                scores[doc_id] += 1
+def get_title_scores(query_tokens, index):
+    """ Helper to rank documents by count of distinct query words in title. """
+    scores = {}
+    for term in set(query_tokens):
+        if term in index.df:
+            postings = index.read_posting_list(term, 'postings_gcp/')
+            for doc_id, tf in postings:
+                scores[doc_id] = scores.get(doc_id, 0) + 1
     return scores
 
 
-# --- ROUTES ---
+def get_body_scores(query_tokens, index):
+    """ Helper to calculate TF-IDF based cosine similarity for body text. """
+    scores = {}
+    query_counts = Counter(query_tokens)
+    query_norm_sq = 0
+
+    # Calculate query weights and dot product
+    for term, tf_q in query_counts.items():
+        if term in index.df:
+            idf = math.log10(len(index.DL) / index.df[term])
+            w_t_q = tf_q * idf
+            query_norm_sq += w_t_q ** 2
+
+            postings = index.read_posting_list(term, 'postings_gcp/')
+            for doc_id, tf_d in postings:
+                w_t_d = tf_d * idf
+                scores[doc_id] = scores.get(doc_id, 0) + (w_t_q * w_t_d)
+
+    if not scores: return {}
+
+    # Normalize by query and document norms
+    query_norm = math.sqrt(query_norm_sq)
+    results = {}
+    for doc_id, dot_product in scores.items():
+        norm_d = index.doc_norms.get(doc_id, 1)
+        results[doc_id] = dot_product / (query_norm * norm_d)
+    return results
+
+
+# --- Routes ---
 
 @app.route("/search")
 def search():
-    """
-    Main Search Engine: Combines Body (BM25), Title, Anchor, PageRank, and PageViews.
-    """
+    ''' Returns up to a 100 of your best search results for the query. This is
+        the place to put forward your best search engine, and you are free to
+        implement the retrieval whoever you'd like within the bound of the
+        project requirements (efficiency, quality, etc.). That means it is up to
+        you to decide on whether to use stemming, remove stopwords, use
+        PageRank, query expansion, etc.
+
+        To issue a query navigate to a URL like:
+         http://YOUR_SERVER_DOMAIN/search?query=hello+world
+        where YOUR_SERVER_DOMAIN is something like XXXX-XX-XX-XX-XX.ngrok.io
+        if you're using ngrok on Colab or your external IP on GCP.
+    Returns:
+    --------
+        list of up to 100 search results, ordered from best to worst where each
+        element is a tuple (wiki_id, title).
+    '''
+    query = request.args.get('query', '')
+    if not query: return jsonify([])
+
+    query_tokens = tokenize(query)
+    if not query_tokens: return jsonify([])
+
+    # 1. Gather scores from indices
+    body_scores = get_bm25_scores(query_tokens, body_index)
+    title_scores = get_title_scores(query_tokens, title_index)
+    anchor_scores = get_title_scores(query_tokens, anchor_index)
+
+    # 2. OPTIMIZATION 2: Efficient Combination & Boosting
+    # We use a single loop and avoid unnecessary dictionary lookups
+    all_docs = set(body_scores.keys()) | set(title_scores.keys()) | set(anchor_scores.keys())
+
+    # We will use a list of tuples (score, doc_id) for the heap
+    candidates = []
+
+    for doc_id in all_docs:
+        # Calculate base text score (Weights: Title 0.5, Body 0.3, Anchor 0.2)
+        text_score = (title_scores.get(doc_id, 0) * 0.5) + \
+                     (body_scores.get(doc_id, 0) * 0.3) + \
+                     (anchor_scores.get(doc_id, 0) * 0.2)
+
+        # Apply the pre-calculated global boost
+        final_score = text_score * global_boost_dict.get(doc_id, 1)
+
+        # OPTIMIZATION 3: Top-K using a Heap
+        # This is faster than sorting the entire result set at the end
+        if len(candidates) < 100:
+            heapq.heappush(candidates, (final_score, doc_id))
+        else:
+            # If current score is better than the smallest score in the top 100
+            if final_score > candidates[0][0]:
+                heapq.heapreplace(candidates, (final_score, doc_id))
+
+    # 3. Final results extraction (Heap is a min-priority queue, so we sort it once at the end)
+    sorted_res = sorted(candidates, key=lambda x: x[0], reverse=True)
+
+    return jsonify([(str(d), id_to_title.get(d, "Unknown")) for s, d in sorted_res])
+
+@app.route("/search_body")
+def search_body():
+    ''' Returns up to a 100 search results for the query using TFIDF AND COSINE
+        SIMILARITY OF THE BODY OF ARTICLES ONLY. DO NOT use stemming. DO USE the
+        staff-provided tokenizer from Assignment 3 (GCP part) to do the
+        tokenization and remove stopwords.
+
+        To issue a query navigate to a URL like:
+         http://YOUR_SERVER_DOMAIN/search_body?query=hello+world
+        where YOUR_SERVER_DOMAIN is something like XXXX-XX-XX-XX-XX.ngrok.io
+        if you're using ngrok on Colab or your external IP on GCP.
+    Returns:
+    --------
+        list of up to 100 search results, ordered from best to worst where each
+        element is a tuple (wiki_id, title).
+    '''
     res = []
     query = request.args.get('query', '')
     if len(query) == 0:
         return jsonify(res)
 
-    tokens = [
-    stemmer.stem(tok.lower())
-    for tok, tok_type in tokenize_with_types(query)
-    if tok_type == 'WORD'
-]
-
-    # 1. Calculate Scores
-    # Weights configuration
-    w_body = 1.0
-    w_title = 5.0
-    w_anchor = 3.0
-    w_pr = 0.5
-    w_pv = 0.1
-
-    body_scores = bm25_engine.search(tokens)
-    title_scores = get_binary_score(tokens, title_index)
-    anchor_scores = get_binary_score(tokens, anchor_index)
-
-    # 2. Merge Candidates
-    all_candidates = set(body_scores.keys()) | set(title_scores.keys()) | set(anchor_scores.keys())
-
-    final_scores = []
-    for doc_id in all_candidates:
-        score = (w_body * body_scores.get(doc_id, 0)) + \
-                (w_title * title_scores.get(doc_id, 0)) + \
-                (w_anchor * anchor_scores.get(doc_id, 0))
-
-        # Add PageRank
-        if page_rank:
-            score += w_pr * page_rank.get(doc_id, 0)
-
-        # Add PageViews (Log scaled)
-        if page_views:
-            pv = page_views.get(doc_id, 0)
-            score += w_pv * math.log(pv + 1, 10)
-
-        final_scores.append((doc_id, score))
-
-    # 3. Sort & Format
-    final_scores.sort(key=lambda x: x[1], reverse=True)
-
-    # Return (id, title) using the id2title mapping
-    res = [(str(doc_id), id2title.get(doc_id, str(doc_id))) for doc_id, score in final_scores[:100]]
+    # BEGIN SOLUTION
+    query_tokens = tokenize(query)
+    scores = get_body_scores(query_tokens, body_index)
+    sorted_res = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:100]
+    res = [(str(doc_id), id_to_title.get(doc_id, "Unknown")) for doc_id, score in sorted_res]
+    # END SOLUTION
     return jsonify(res)
 
 
-@app.route("/search_body")
-def search_body():
-    """ Returns BM25 scores for body """
-    res = []
-    query = request.args.get('query', '')
-    if len(query) == 0: return jsonify(res)
-
-    tokens = tokenize(query)
-    scores = bm25_engine.search(tokens)
-    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-
-    res = [(str(doc_id), id2title.get(doc_id, str(doc_id))) for doc_id, score in sorted_scores[:100]]
-    return jsonify(res)
-
-
-@app.route("/search_title")
 @app.route("/search_title")
 def search_title():
+    ''' Returns ALL (not just top 100) search results that contain A QUERY WORD
+        IN THE TITLE of articles, ordered in descending order of the NUMBER OF
+        DISTINCT QUERY WORDS that appear in the title. DO NOT use stemming. DO
+        USE the staff-provided tokenizer from Assignment 3 (GCP part) to do the
+        tokenization and remove stopwords. For example, a document
+        with a title that matches two distinct query words will be ranked before a
+        document with a title that matches only one distinct query word,
+        regardless of the number of times the term appeared in the title (or
+        query).
+
+        Test this by navigating to the a URL like:
+         http://YOUR_SERVER_DOMAIN/search_title?query=hello+world
+        where YOUR_SERVER_DOMAIN is something like XXXX-XX-XX-XX-XX.ngrok.io
+        if you're using ngrok on Colab or your external IP on GCP.
+    Returns:
+    --------
+        list of ALL (not just top 100) search results, ordered from best to
+        worst where each element is a tuple (wiki_id, title).
+    '''
+    res = []
     query = request.args.get('query', '')
-    if query == "":
-        return jsonify([])
+    if len(query) == 0:
+        return jsonify(res)
 
-    results = search_binary_logic(query, title_index)
-    return jsonify(results)
-
+    # BEGIN SOLUTION
+    query_tokens = tokenize(query)
+    scores = get_title_scores(query_tokens, title_index)
+    sorted_res = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    res = [(str(doc_id), id_to_title.get(doc_id, "Unknown")) for doc_id, count in sorted_res]
+    # END SOLUTION
+    return jsonify(res)
 
 
 @app.route("/search_anchor")
 def search_anchor():
-    query = request.args.get('query', '')
-    if query == "":
-        return jsonify([])
+    ''' Returns ALL (not just top 100) search results that contain A QUERY WORD
+        IN THE ANCHOR TEXT of articles, ordered in descending order of the
+        NUMBER OF QUERY WORDS that appear in anchor text linking to the page.
+        DO NOT use stemming. DO USE the staff-provided tokenizer from Assignment
+        3 (GCP part) to do the tokenization and remove stopwords. For example,
+        a document with a anchor text that matches two distinct query words will
+        be ranked before a document with anchor text that matches only one
+        distinct query word, regardless of the number of times the term appeared
+        in the anchor text (or query).
 
-    results = search_binary_logic(query, anchor_index)
-    return jsonify(results)
+        Test this by navigating to the a URL like:
+         http://YOUR_SERVER_DOMAIN/search_anchor?query=hello+world
+        where YOUR_SERVER_DOMAIN is something like XXXX-XX-XX-XX-XX.ngrok.io
+        if you're using ngrok on Colab or your external IP on GCP.
+    Returns:
+    --------
+        list of ALL (not just top 100) search results, ordered from best to
+        worst where each element is a tuple (wiki_id, title).
+    '''
+    res = []
+    query = request.args.get('query', '')
+    if len(query) == 0:
+        return jsonify(res)
+
+    # BEGIN SOLUTION
+    query_tokens = tokenize(query)
+    # Reusing the title score logic as anchor requirements are identical
+    scores = get_title_scores(query_tokens, anchor_index)
+    sorted_res = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    res = [(str(doc_id), id_to_title.get(doc_id, "Unknown")) for doc_id, count in sorted_res]
+    # END SOLUTION
+    return jsonify(res)
 
 
 @app.route("/get_pagerank", methods=['POST'])
 def get_pagerank():
+    ''' Returns PageRank values for a list of provided wiki article IDs.
+
+        Test this by issuing a POST request to a URL like:
+          http://YOUR_SERVER_DOMAIN/get_pagerank
+        with a json payload of the list of article ids. In python do:
+          import requests
+          requests.post('http://YOUR_SERVER_DOMAIN/get_pagerank', json=[1,5,8])
+        As before YOUR_SERVER_DOMAIN is something like XXXX-XX-XX-XX-XX.ngrok.io
+        if you're using ngrok on Colab or your external IP on GCP.
+    Returns:
+    --------
+        list of floats:
+          list of PageRank scores that correrspond to the provided article IDs.
+    '''
     res = []
     wiki_ids = request.get_json()
-    if len(wiki_ids) == 0: return jsonify(res)
+    if len(wiki_ids) == 0:
+        return jsonify(res)
 
-    if page_rank:
-        for doc_id in wiki_ids:
-            try:
-                res.append(page_rank.get(int(doc_id), 0))
-            except:
-                res.append(0)
+    # BEGIN SOLUTION
+    res = [pagerank_dict.get(doc_id, 0) for doc_id in wiki_ids]
+    # END SOLUTION
     return jsonify(res)
 
 
 @app.route("/get_pageview", methods=['POST'])
 def get_pageview():
+    ''' Returns the number of page views that each of the provide wiki articles
+        had in August 2021.
+
+        Test this by issuing a POST request to a URL like:
+          http://YOUR_SERVER_DOMAIN/get_pageview
+        with a json payload of the list of article ids. In python do:
+          import requests
+          requests.post('http://YOUR_SERVER_DOMAIN/get_pageview', json=[1,5,8])
+        As before YOUR_SERVER_DOMAIN is something like XXXX-XX-XX-XX-XX.ngrok.io
+        if you're using ngrok on Colab or your external IP on GCP.
+    Returns:
+    --------
+        list of ints:
+          list of page view numbers from August 2021 that correrspond to the
+          provided list article IDs.
+    '''
     res = []
     wiki_ids = request.get_json()
-    if len(wiki_ids) == 0: return jsonify(res)
+    if len(wiki_ids) == 0:
+        return jsonify(res)
 
-    if page_views:
-        for doc_id in wiki_ids:
-            try:
-                res.append(page_views.get(int(doc_id), 0))
-            except:
-                res.append(0)
+    # BEGIN SOLUTION
+    res = [pageview_dict.get(doc_id, 0) for doc_id in wiki_ids]
+    # END SOLUTION
     return jsonify(res)
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=True)
+    app.run(host='0.0.0.0', port=8080, debug=False)
