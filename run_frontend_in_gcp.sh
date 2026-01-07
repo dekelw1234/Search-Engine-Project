@@ -1,13 +1,13 @@
 INSTANCE_NAME="instance-1"
 REGION=us-central1
 ZONE=us-central1-c
-PROJECT_NAME="YOUR_PROJECT_NAME_HERE"
+PROJECT_NAME="ex3-sagikatan"
 IP_NAME="$PROJECT_NAME-ip"
-GOOGLE_ACCOUNT_NAME="YOUR_ACCOUNT_NAME_HERE" # without the @post.bgu.ac.il or @gmail.com part
+GOOGLE_ACCOUNT_NAME="sagikat" # without the @post.bgu.ac.il or @gmail.com part
 
 # 0. Install Cloud SDK on your local machine or using Could Shell
 # check that you have a proper active account listed
-gcloud auth list 
+gcloud auth list
 # check that the right project and zone are active
 gcloud config list
 # if not set them
@@ -18,8 +18,8 @@ gcloud config list
 gcloud compute addresses create $IP_NAME --project=$PROJECT_NAME --region=$REGION
 gcloud compute addresses list
 # note the IP address printed above, that's your extrenal IP address.
-INSTANCE_IP=$(gcloud compute addresses describe $IP_NAME --region=$REGION --format="get(address)")
-
+#INSTANCE_IP=$(gcloud compute addresses describe $IP_NAME --region=$REGION --format="get(address)")
+INSTANCE_IP=136.116.119.138
 # 2. Create Firewall rule to allow traffic to port 8080 on the instance
 gcloud compute firewall-rules create default-allow-http-8080 \
   --allow tcp:8080 \
@@ -29,7 +29,7 @@ gcloud compute firewall-rules create default-allow-http-8080 \
 # 3. Create the instance. Change to a larger instance (larger than e2-micro) as needed.
 gcloud compute instances create $INSTANCE_NAME \
   --zone=$ZONE \
-  --machine-type=e2-micro \
+  --machine-type=e2-standard-8 \
   --network-interface=address=$INSTANCE_IP,network-tier=PREMIUM,subnet=default \
   --metadata-from-file startup-script=startup_script_gcp.sh \
   --scopes=https://www.googleapis.com/auth/cloud-platform \
@@ -37,8 +37,8 @@ gcloud compute instances create $INSTANCE_NAME \
 # monitor instance creation log using this command. When done (4-5 minutes) terminate using Ctrl+C
 gcloud compute instances tail-serial-port-output $INSTANCE_NAME --zone $ZONE
 
-# After Ctrl+C, run steps 4-8 manually. 
-# Depending on the way you ran this script, you may need to define again 
+# After Ctrl+C, run steps 4-8 manually.
+# Depending on the way you ran this script, you may need to define again
 # the variables from the top (INSTANCE_NAME, etc.) in the console.
 # Verify that the instance is running
 gcloud compute instances list --filter="name=$INSTANCE_NAME" --format="table(name,status,zone,EXTERNAL_IP)"

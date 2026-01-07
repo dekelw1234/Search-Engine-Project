@@ -22,17 +22,15 @@ with open('postings_gcp/anchor_index.pkl', 'rb') as f:
 # Loading Ranking Dictionaries
 with open('pagerank.pkl', 'rb') as f:
     pagerank_dict = pickle.load(f)
-with open('pageviews.pkl', 'rb') as f:
-    pageview_dict = pickle.load(f)
+
 
 global_boost_dict = {}
-all_relevant_ids = set(pagerank_dict.keys()) | set(pageview_dict.keys())
+all_relevant_ids = set(pagerank_dict.keys())
 
 for doc_id in all_relevant_ids:
     pr = pagerank_dict.get(doc_id, 0)
-    pv = pageview_dict.get(doc_id, 0)
     # The formula is pre-calculated here
-    global_boost_dict[doc_id] = (1 + math.log10(pr + 1)) * (1 + math.log10(pv + 1))
+    global_boost_dict[doc_id] = 1 + math.log10(pr + 1)
 # Mapping Wiki IDs to Titles
 with open('id_to_title.pkl', 'rb') as f:
     id_to_title = pickle.load(f)
@@ -461,14 +459,11 @@ def get_pageview():
           list of page view numbers from August 2021 that correrspond to the
           provided list article IDs.
     '''
-    res = []
     wiki_ids = request.get_json()
-    if len(wiki_ids) == 0:
-        return jsonify(res)
+    with open('pageviews.pkl', 'rb') as f:
+        local_pv_dict = pickle.load(f)
 
-    # BEGIN SOLUTION
-    res = [pageview_dict.get(doc_id, 0) for doc_id in wiki_ids]
-    # END SOLUTION
+    res = [local_pv_dict.get(doc_id, 0) for doc_id in wiki_ids]
     return jsonify(res)
 
 
