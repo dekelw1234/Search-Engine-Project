@@ -10,7 +10,7 @@ import heapq
 import os
 
 
-ENGINE_VERSION = os.getenv("ENGINE_VERSION", "BASE_BODY_NO_PR")
+ENGINE_VERSION = os.getenv("ENGINE_VERSION", "BALANCED_2_NO_PR")
 WEIGHT_CONFIGS = {
 
     "BASE_BODY_NO_PR": {"title": 0.0, "body": 1.0, "anchor": 0.0, "use_pagerank": False},
@@ -168,7 +168,7 @@ def get_body_scores(query_tokens, index):
 
 
 def rank_with_weights(query_tokens):
-    cfg = WEIGHT_CONFIGS.get(ENGINE_VERSION, WEIGHT_CONFIGS["BASE_BODY_NO_PR"])
+    cfg = WEIGHT_CONFIGS.get(ENGINE_VERSION, WEIGHT_CONFIGS["BALANCED_2_NO_PR"])
 
     body_scores = get_bm25_scores(query_tokens, body_index)
     title_scores = get_title_scores(query_tokens, title_index)
