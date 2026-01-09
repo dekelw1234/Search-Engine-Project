@@ -1,0 +1,5 @@
+*.pkl
+*.bin
+postings_gcp/
+venv/
+__pycache__/
