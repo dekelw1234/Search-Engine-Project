@@ -8,7 +8,26 @@ import math
 from collections import Counter
 import heapq
 import os
-ENGINE_VERSION = os.getenv("ENGINE_VERSION", "V4")
+
+
+ENGINE_VERSION = os.getenv("ENGINE_VERSION", "BASE_BODY_NO_PR")
+WEIGHT_CONFIGS = {
+
+    "BASE_BODY_NO_PR": {"title": 0.0, "body": 1.0, "anchor": 0.0, "use_pagerank": False},
+    "BASE_BODY__PR": {"title": 0.0, "body": 1.0, "anchor": 0.0, "use_pagerank": True, "pagerank_alpha": 0.02},
+    "BASE_TITLE_NO_PR": {"title": 1.0, "body": 0.0, "anchor": 0.0, "use_pagerank": False},
+    "BASE_TITLE_PR": {"title": 1.0, "body": 0.0, "anchor": 0.0, "use_pagerank": True, "pagerank_alpha": 0.02},
+    "TITLE_60_NO_PR": {"title": 0.6, "body": 0.3, "anchor": 0.1, "use_pagerank": False},
+    "TITLE_60_PR": {"title": 0.6, "body": 0.3, "anchor": 0.1, "use_pagerank": True, "pagerank_alpha": 0.02},
+    "BALANCED_2_NO_PR": {"title": 0.45, "body": 0.35, "anchor": 0.2, "use_pagerank": False},
+    "BALANCED_2_PR": {"title": 0.45, "body": 0.35, "anchor": 0.2, "use_pagerank": True, "pagerank_alpha": 0.02},
+    "BODY_50_NO_PR": {"title": 0.3, "body": 0.5, "anchor": 0.2, "use_pagerank": False},
+    "BODY_50_PR": {"title": 0.3, "body": 0.5, "anchor": 0.2, "use_pagerank": True, "pagerank_alpha": 0.02},
+    "PR_LOW_TITLE": {"title": 0.5, "body": 0.3, "anchor": 0.2, "use_pagerank": True, "pagerank_alpha": 0.02},
+    "RECOMMENDED_1": {"title": 0.5, "body": 0.3, "anchor": 0.2, "use_pagerank": True, "pagerank_alpha": 0.1},
+    "RECOMMENDED_2": {"title": 0.45, "body": 0.35, "anchor": 0.2, "use_pagerank": True, "pagerank_alpha": 0.08},
+}
+print("Running engine version:", ENGINE_VERSION)
 
 class MyFlaskApp(Flask):
     def run(self, host=None, port=None, debug=None, **options):
@@ -147,15 +166,9 @@ def get_body_scores(query_tokens, index):
 
 
 
-WEIGHT_CONFIGS = {
-    "V1": {"title": 0.0, "body": 1.0, "anchor": 0.0, "use_pagerank": False},
-    "V2": {"title": 0.2, "body": 0.8, "anchor": 0.0, "use_pagerank": False},
-    "V3": {"title": 0.5, "body": 0.3, "anchor": 0.2, "use_pagerank": False},
-    "V4": {"title": 0.5, "body": 0.3, "anchor": 0.2, "use_pagerank": True},
-}
 
 def rank_with_weights(query_tokens):
-    cfg = WEIGHT_CONFIGS[ENGINE_VERSION]
+    cfg = WEIGHT_CONFIGS.get(ENGINE_VERSION, WEIGHT_CONFIGS["BASE_BODY_NO_PR"])
 
     body_scores = get_bm25_scores(query_tokens, body_index)
     title_scores = get_title_scores(query_tokens, title_index)
@@ -172,7 +185,9 @@ def rank_with_weights(query_tokens):
         )
 
         if cfg["use_pagerank"]:
-            text_score *= global_boost_dict.get(doc_id, 1)
+            alpha = cfg.get("pagerank_alpha", 0.05)
+            boost = global_boost_dict.get(doc_id, 1)
+            text_score *= (1 + alpha * boost)
 
         final_scores[doc_id] = text_score
 

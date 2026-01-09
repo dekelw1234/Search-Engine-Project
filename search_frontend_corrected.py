@@ -144,41 +144,6 @@ def get_body_scores(query_tokens, index):
 
 # --- 4. Routes ---
 
-
-ENGINE_VERSION = "V4"
-
-WEIGHT_CONFIGS = {
-    "V1": {"title": 0.0, "body": 1.0, "anchor": 0.0, "use_pagerank": False},
-    "V2": {"title": 0.2, "body": 0.8, "anchor": 0.0, "use_pagerank": False},
-    "V3": {"title": 0.5, "body": 0.3, "anchor": 0.2, "use_pagerank": False},
-    "V4": {"title": 0.5, "body": 0.3, "anchor": 0.2, "use_pagerank": True},
-}
-
-def rank_with_weights(query_tokens):
-    cfg = WEIGHT_CONFIGS[ENGINE_VERSION]
-
-    body_scores = get_bm25_scores(query_tokens, body_index)
-    title_scores = get_title_scores(query_tokens, title_index)
-    anchor_scores = get_title_scores(query_tokens, anchor_index)
-
-    all_docs = set(body_scores) | set(title_scores) | set(anchor_scores)
-    final_scores = {}
-
-    for doc_id in all_docs:
-        text_score = (
-            title_scores.get(doc_id, 0) * cfg["title"] +
-            body_scores.get(doc_id, 0)  * cfg["body"]  +
-            anchor_scores.get(doc_id, 0) * cfg["anchor"]
-        )
-
-        if cfg["use_pagerank"]:
-            text_score *= global_boost_dict.get(doc_id, 1)
-
-        final_scores[doc_id] = text_score
-
-    return final_scores
-
-
 @app.route("/search")
 def search():
     query = request.args.get('query', '')
@@ -188,34 +153,29 @@ def search():
     if not query_tokens: return jsonify([])
 
     # 1. Gather scores
-    # body_scores = get_bm25_scores(query_tokens, body_index)
-    # title_scores = get_title_scores(query_tokens, title_index)
-    # anchor_scores = get_title_scores(query_tokens, anchor_index)
-    scores = rank_with_weights(query_tokens)
-    top_docs = heapq.nlargest(100, scores.items(), key=lambda x: x[1])
-    return jsonify([
-        (str(doc_id), id_to_title.get(doc_id, "Unknown"))
-        for doc_id, _ in top_docs
-    ])
-    # # 2. Combine & Boost
-    # all_docs = set(body_scores.keys()) | set(title_scores.keys()) | set(anchor_scores.keys())
-    # candidates = []
-    #
-    # for doc_id in all_docs:
-    #     text_score = (title_scores.get(doc_id, 0) * 0.5) + \
-    #                  (body_scores.get(doc_id, 0) * 0.3) + \
-    #                  (anchor_scores.get(doc_id, 0) * 0.2)
-    #
-    #     final_score = text_score * global_boost_dict.get(doc_id, 1)
-    #
-    #     if len(candidates) < 100:
-    #         heapq.heappush(candidates, (final_score, doc_id))
-    #     else:
-    #         if final_score > candidates[0][0]:
-    #             heapq.heapreplace(candidates, (final_score, doc_id))
-    #
-    # sorted_res = sorted(candidates, key=lambda x: x[0], reverse=True)
-    # return jsonify([(str(d), id_to_title.get(d, "Unknown")) for s, d in sorted_res])
+    body_scores = get_bm25_scores(query_tokens, body_index)
+    title_scores = get_title_scores(query_tokens, title_index)
+    anchor_scores = get_title_scores(query_tokens, anchor_index)
+
+    # 2. Combine & Boost
+    all_docs = set(body_scores.keys()) | set(title_scores.keys()) | set(anchor_scores.keys())
+    candidates = []
+
+    for doc_id in all_docs:
+        text_score = (title_scores.get(doc_id, 0) * 0.5) + \
+                     (body_scores.get(doc_id, 0) * 0.3) + \
+                     (anchor_scores.get(doc_id, 0) * 0.2)
+
+        final_score = text_score * global_boost_dict.get(doc_id, 1)
+
+        if len(candidates) < 100:
+            heapq.heappush(candidates, (final_score, doc_id))
+        else:
+            if final_score > candidates[0][0]:
+                heapq.heapreplace(candidates, (final_score, doc_id))
+
+    sorted_res = sorted(candidates, key=lambda x: x[0], reverse=True)
+    return jsonify([(str(d), id_to_title.get(d, "Unknown")) for s, d in sorted_res])
 
 
 @app.route("/search_body")
