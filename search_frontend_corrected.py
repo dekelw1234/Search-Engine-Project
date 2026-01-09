@@ -7,8 +7,7 @@ import re
 import math
 from collections import Counter
 import heapq
-import os
-ENGINE_VERSION = os.getenv("ENGINE_VERSION", "V4")
+
 
 class MyFlaskApp(Flask):
     def run(self, host=None, port=None, debug=None, **options):
@@ -146,6 +145,7 @@ def get_body_scores(query_tokens, index):
 # --- 4. Routes ---
 
 
+ENGINE_VERSION = "V4"
 
 WEIGHT_CONFIGS = {
     "V1": {"title": 0.0, "body": 1.0, "anchor": 0.0, "use_pagerank": False},
